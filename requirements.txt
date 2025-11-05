@@ -1,4 +1,4 @@
-deepeval>=3.6.0,<3.8.0
+deepeval>=3.7.0,<3.9.0
 fastapi==0.110.0
 uvicorn==0.29.0
 python-dotenv>=1.0.0
