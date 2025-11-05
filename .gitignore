@@ -1,0 +1,40 @@
+# Claude Code
+.claude
+CLAUDE.md
+
+# Virtual environments
+.venv/
+env/
+
+# Byte-compiled / optimized / DLL files
+*.pyd
+*.pyo
+*.pyc
+__pycache__/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Pytest
+.cache/
+
+# MyPy
+.mypy_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# VSCode settings (already included)
+.vscode/

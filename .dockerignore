@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.vscode/
+.idea/
+*.log
+*.tmp
+.DS_Store
+node_modules/

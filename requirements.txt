@@ -1,0 +1,9 @@
+deepeval>=3.6.0,<3.8.0
+fastapi==0.110.0
+uvicorn==0.29.0
+python-dotenv>=1.0.0
+httpx>=0.28.1,<1.0.0
+
+# Note: We install a newer deepeval to override the wrapper's 3.4.1
+# which has unicode encoding issues. This is installed AFTER the wrapper's
+# requirements, so it takes precedence.

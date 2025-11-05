@@ -1,0 +1,183 @@
+name: Build and Publish Multi-Arch Image
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Deepeval latest version
+        id: deepeval_version
+        run: |
+          set -eux
+          VERSION="$(python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('https://pypi.org/pypi/deepeval/json', timeout=10)); print(data['info']['version'])")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine current pin and build necessity
+        id: build_guard
+        run: |
+          set -eux
+          # Extract version from range like "deepeval>=3.6.0,<3.8.0"
+          CURRENT="$(grep -E '^deepeval' requirements.txt | sed -E 's/.*>=([0-9.]+).*/\1/' || echo '')"
+          LATEST="${{ steps.deepeval_version.outputs.version }}"
+          EVENT="${{ github.event_name }}"
+          BUILD="false"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            BUILD="true"
+            echo "Build triggered manually via workflow_dispatch"
+          elif [ -z "$CURRENT" ]; then
+            BUILD="true"
+            echo "No current deepeval version found in requirements.txt, forcing build"
+          elif [ "$CURRENT" != "$LATEST" ]; then
+            BUILD="true"
+            echo "New deepeval version detected: ${CURRENT} -> ${LATEST}"
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD" != "true" ]; then
+            echo "Latest deepeval version (${LATEST}) already matches pinned version (${CURRENT})."
+          fi
+
+      - name: Reference local build commands
+        run: |
+          set -eux
+          echo "Locally you can reproduce with:"
+          echo "  make build TAG=${{ steps.deepeval_version.outputs.version }}"
+          echo "  make buildx TAG=${{ steps.deepeval_version.outputs.version }}"
+          echo "  make push TAG=${{ steps.deepeval_version.outputs.version }}"
+
+      - name: Skip build (no new version detected)
+        if: steps.build_guard.outputs.build != 'true'
+        run: echo "Skipping build because no new deepeval release was detected."
+
+      - name: Set up QEMU
+        if: steps.build_guard.outputs.build == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.build_guard.outputs.build == 'true'
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.build_guard.outputs.build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        if: steps.build_guard.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/identitry/deepeval-mcp:latest
+            ghcr.io/identitry/deepeval-mcp:${{ steps.deepeval_version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test published image
+        if: steps.build_guard.outputs.build == 'true'
+        env:
+          IMAGE: ghcr.io/identitry/deepeval-mcp
+          VERSION: ${{ steps.deepeval_version.outputs.version }}
+          # Dummy API key for smoke test only - won't run actual evaluations
+          # The container requires at least one LLM API key to start
+          OPENAI_API_KEY: sk-dummy-key-for-ci-smoke-test-only
+        run: |
+          set -eux
+          docker pull "${IMAGE}:${VERSION}"
+          # Run container with dummy API key to test startup and health endpoint
+          cid="$(docker run --rm -d -p 8000:8000 \
+            -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
+            "${IMAGE}:${VERSION}")"
+          trap "docker stop $cid" EXIT
+          echo "Container started, waiting for health check..."
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              echo "✅ Health check passed after ${i} attempts"
+              curl -fsS http://localhost:8000/health
+              exit 0
+            fi
+            echo "Attempt ${i}/15 failed, retrying..."
+            sleep 2
+          done
+          echo "❌ Health check failed after 15 attempts"
+          echo "Container logs:"
+          docker logs "$cid" || true
+          exit 1
+
+      - name: Update requirements.txt with new version
+        if: steps.build_guard.outputs.build == 'true' && steps.build_guard.outputs.current != steps.build_guard.outputs.latest
+        run: |
+          set -eux
+          CURRENT="${{ steps.build_guard.outputs.current }}"
+          LATEST="${{ steps.build_guard.outputs.latest }}"
+
+          # Calculate next major version for upper bound (e.g., 3.7.0 -> 3.9.0)
+          MAJOR=$(echo "$LATEST" | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | cut -d. -f2)
+          NEXT_MINOR=$((MINOR + 2))
+          UPPER="${MAJOR}.${NEXT_MINOR}.0"
+
+          # Update requirements.txt with new version range
+          sed -i.bak -E "s|^deepeval>=.*|deepeval>=${LATEST},<${UPPER}|" requirements.txt
+          rm requirements.txt.bak
+
+          echo "Updated requirements.txt: deepeval>=${LATEST},<${UPPER}"
+          cat requirements.txt | grep deepeval
+
+      - name: Commit updated requirements.txt
+        if: steps.build_guard.outputs.build == 'true' && steps.build_guard.outputs.current != steps.build_guard.outputs.latest
+        run: |
+          set -eux
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add requirements.txt
+          git commit -m "chore: update deepeval to ${{ steps.build_guard.outputs.latest }}"
+          git push
+
+      - name: Comment on latest commit
+        if: steps.build_guard.outputs.build == 'true'
+        uses: actions/github-script@v7
+        env:
+          IMAGE: ghcr.io/identitry/deepeval-mcp
+          VERSION: ${{ steps.deepeval_version.outputs.version }}
+          CURRENT: ${{ steps.build_guard.outputs.current }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const image = process.env.IMAGE;
+            const version = process.env.VERSION;
+            const current = process.env.CURRENT;
+            const upgraded = current && current !== version ? ` (upgraded from ${current})` : '';
+            const body = [
+              `✅ Docker image \`${image}:${version}\` built and pushed to GHCR${upgraded}.`,
+              "",
+              `Pull via \`docker pull ${image}:${version}\``,
+              "",
+              `Latest tag: https://ghcr.io/${image.replace('ghcr.io/', '')}`
+            ].join("\n");
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body,
+            });
