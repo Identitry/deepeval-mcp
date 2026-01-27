@@ -200,9 +200,8 @@ async def startup() -> None:
             "OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY. "
             "Please set one in your .env file."
         )
-        raise RuntimeError(
-            "Missing required LLM API key. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY."
-        )
+        # Keep the process alive so health checks and diagnostics remain reachable
+        return
 
     logger.info("LLM API keys configured: %s", ", ".join(configured_keys))
 
@@ -226,14 +225,23 @@ async def startup() -> None:
         logger.warning("Could not determine DeepEval version: %s", e)
 
     logger.debug("Initialising wrapper client on startup.")
-    wrapper_client = DeepevalWrapperClient(expose_wrapper_app=True)
-    logger.info("Wrapper client initialised.")
+    try:
+        wrapper_client = DeepevalWrapperClient(expose_wrapper_app=True)
+        logger.info("Wrapper client initialised.")
 
-    # Mount the wrapper's FastAPI app to expose all its endpoints directly
-    if wrapper_client.wrapper_app:
-        app.mount("/wrapper", wrapper_client.wrapper_app)
-        logger.info("Wrapper app mounted at /wrapper - all wrapper endpoints are now accessible!")
-        logger.info("Available wrapper routes: /wrapper/evaluate/, /wrapper/metrics/, /wrapper/jobs/, etc.")
+        # Mount the wrapper's FastAPI app to expose all its endpoints directly
+        if wrapper_client.wrapper_app:
+            app.mount("/wrapper", wrapper_client.wrapper_app)
+            logger.info("Wrapper app mounted at /wrapper - all wrapper endpoints are now accessible!")
+            logger.info("Available wrapper routes: /wrapper/evaluate/, /wrapper/metrics/, /wrapper/jobs/, etc.")
+    except Exception:
+        # Do not crash the container; surface the failure via logs and /healthz
+        logger.exception(
+            "Failed to initialise Deepeval wrapper client. "
+            "Service will stay up, but /mcp/* and /wrapper/* will return 503."
+        )
+        wrapper_client = None
+        return
 
     # Print startup completion
     print("\n" + "="*70)
